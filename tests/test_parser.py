@@ -70,6 +70,49 @@ class TestIndygoParser:
         a, b, c = parser._resolve_lr_pc([{"type": "lr-pc", "serialNumber": "123456"}])
         assert a == "123456"
 
+    def test_resolve_hardware_ids_lr_pc_vs2(self):
+        """Pool Command VS2 (lr-pc-vs2) must be recognized like lr-pc.
+
+        Reproduces the real-world payload where:
+          - the pool command type is ``lr-pc-vs2`` (not ``lr-pc``);
+          - ``relay`` holds the gateway's MongoId, not a short hex id;
+          - the hardware short id is the suffix of the ``name``
+            (``LRPCVS2-0C91F2`` -> ``0C91F2``).
+        """
+        parser = IndygoParser()
+        modules = [
+            {
+                "type": "lr-mb-10",
+                "serialNumber": "1000000DB0930001",
+                "name": "LRMB10-0DB093",
+                "id": "gw-id",
+            },
+            {
+                "type": "lr-pc-vs2",
+                "serialNumber": "4903020C91F20001",
+                "name": "LRPCVS2-0C91F2",
+                "relay": "gw-id",
+                "id": "pc-id",
+            },
+        ]
+        pool_address, device_short_id, relay_id = parser.resolve_hardware_ids(modules)
+        assert pool_address == "1000000DB0930001"
+        assert device_short_id == "0C91F2"
+        assert relay_id == "gw-id"
+
+    def test_resolve_hardware_ids_ipx_falls_back_to_name_suffix(self):
+        """When IPX has no serialNumber/ipxRelay, fall back to name suffix.
+
+        Older API responses populate those fields, but the current API may
+        leave them empty - we still want a usable id from ``IPX-A3EA4F``.
+        """
+        parser = IndygoParser()
+        modules = [{"type": "ipx", "name": "IPX-A3EA4F"}]
+        pool_address, device_short_id, relay_id = parser.resolve_hardware_ids(modules)
+        assert pool_address == "A3EA4F"
+        assert device_short_id == "A3EA4F"
+        assert relay_id == "A3EA4F"
+
     def test_resolve_ipx_direct(self):
         """Test IPX module direct resolution."""
         parser = IndygoParser()

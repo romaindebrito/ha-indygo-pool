@@ -294,6 +294,13 @@ class IndygoPoolApiClient:
         url = (
             f"{BASE_URL}/v1/module/{self._pool_address}/status/{self._device_short_id}"
         )
+        LOGGER.debug(
+            "Fetching status: pool_address=%s device_short_id=%s relay_id=%s -> %s",
+            self._pool_address,
+            self._device_short_id,
+            self._relay_id,
+            url,
+        )
         status_data = await self._request(
             "GET",
             url,

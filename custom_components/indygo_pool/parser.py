@@ -37,13 +37,28 @@ class IndygoParser:
     # Hardware ID resolution (from module list, no HTML needed)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _name_suffix(name: str | None) -> str | None:
+        """Extract the hardware suffix from a module name.
+
+        Module names follow the pattern ``<MODEL>-<HEX_ID>`` (e.g.
+        ``LRPCVS2-0C91F2``, ``IPX-A3EA4F``, ``LRMB10-0DB093``).  This
+        helper returns the suffix, which is the device short id used by
+        the API in URLs.
+        """
+        if not name:
+            return None
+        parts = str(name).rsplit("-", 1)
+        if len(parts) == 2 and parts[1]:
+            return parts[1]
+        return None
+
     def _extract_device_ids(self, lr_pc: dict) -> tuple[str | None, str | None]:
         """Extract device short ID and relay ID from lr-pc module."""
-        name_parts = lr_pc.get("name", "").split("-")
-        if len(name_parts) > 1:
-            device_short_id = name_parts[-1]
-        else:
-            device_short_id = lr_pc.get("serialNumber", "")[-6:]
+        device_short_id = self._name_suffix(lr_pc.get("name"))
+        if not device_short_id:
+            serial = lr_pc.get("serialNumber") or ""
+            device_short_id = serial[-6:] if serial else None
 
         relay_id = lr_pc.get("relay") or device_short_id
         return device_short_id, relay_id
@@ -51,9 +66,22 @@ class IndygoParser:
     def _resolve_lr_pc(
         self, modules: list[dict]
     ) -> tuple[str | None, str | None, str | None]:
-        """Resolve IDs from lr-pc + gateway modules."""
-        gateway = next((m for m in modules if m.get("type") == "lr-mb-10"), None)
-        lr_pc = next((m for m in modules if m.get("type") == "lr-pc"), None)
+        """Resolve IDs from lr-pc + gateway modules.
+
+        Accepts any module whose ``type`` starts with ``lr-pc`` (covers
+        ``lr-pc``, ``lr-pc-vs1``, ``lr-pc-vs2``, ...) and any gateway
+        whose ``type`` starts with ``lr-mb`` (``lr-mb-10``, ...).  When
+        the gateway lacks a ``serialNumber`` field, falls back to the
+        hardware suffix of its name.
+        """
+        gateway = next(
+            (m for m in modules if str(m.get("type", "")).startswith("lr-mb")),
+            None,
+        )
+        lr_pc = next(
+            (m for m in modules if str(m.get("type", "")).startswith("lr-pc")),
+            None,
+        )
 
         if not lr_pc:
             return None, None, None
@@ -61,21 +89,47 @@ class IndygoParser:
         if not gateway:
             gateway = lr_pc
 
-        pool_address = gateway.get("serialNumber")
+        pool_address = gateway.get("serialNumber") or self._name_suffix(
+            gateway.get("name")
+        )
         device_short_id, relay_id = self._extract_device_ids(lr_pc)
+        _LOGGER.debug(
+            "Resolved lr-pc: type=%s name=%s -> pool_address=%s "
+            "device_short_id=%s relay_id=%s",
+            lr_pc.get("type"),
+            lr_pc.get("name"),
+            pool_address,
+            device_short_id,
+            relay_id,
+        )
         return pool_address, device_short_id, relay_id
 
     def _resolve_ipx(
         self, modules: list[dict]
     ) -> tuple[str | None, str | None, str | None]:
-        """Resolve IDs from IPX module as fallback."""
+        """Resolve IDs from IPX module as fallback.
+
+        When ``serialNumber`` / ``ipxRelay`` are missing in the API
+        payload, falls back to the hardware suffix of the module name
+        (``IPX-A3EA4F`` -> ``A3EA4F``).
+        """
         ipx = next((m for m in modules if m.get("type") == "ipx"), None)
         if not ipx:
             return None, None, None
 
-        pool_address = ipx.get("serialNumber")
-        device_short_id = ipx.get("ipxRelay")
+        suffix = self._name_suffix(ipx.get("name"))
+        pool_address = ipx.get("serialNumber") or suffix
+        device_short_id = ipx.get("ipxRelay") or suffix
         relay_id = device_short_id
+        _LOGGER.debug(
+            "Resolved ipx: name=%s serialNumber=%s ipxRelay=%s "
+            "-> pool_address=%s device_short_id=%s",
+            ipx.get("name"),
+            ipx.get("serialNumber"),
+            ipx.get("ipxRelay"),
+            pool_address,
+            device_short_id,
+        )
         return pool_address, device_short_id, relay_id
 
     def resolve_hardware_ids(
@@ -83,18 +137,43 @@ class IndygoParser:
     ) -> tuple[str | None, str | None, str | None]:
         """Resolve pool_address, device_short_id and relay_id from modules.
 
-        Tries lr-pc first, falls back to IPX.
+        Tries lr-pc (any sub-variant) first, falls back to IPX.  Each
+        identifier is resolved independently so that a partial match in
+        lr-pc can be completed by the IPX resolver.
 
         Returns:
             Tuple of (pool_address, device_short_id, relay_id)
         """
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "Resolving hardware IDs from %d modules: %s",
+                len(modules),
+                [
+                    {
+                        "id": m.get("id"),
+                        "type": m.get("type"),
+                        "name": m.get("name"),
+                        "serialNumber": m.get("serialNumber"),
+                        "relay": m.get("relay"),
+                        "ipxRelay": m.get("ipxRelay"),
+                        "pool": m.get("pool"),
+                    }
+                    for m in modules
+                ],
+            )
+
         pool_address, device_short_id, relay_id = self._resolve_lr_pc(modules)
-        if not pool_address:
-            pool_address, device_short_id, relay_id = self._resolve_ipx(modules)
+
+        if not pool_address or not device_short_id:
+            ipx_pa, ipx_dsi, ipx_relay = self._resolve_ipx(modules)
+            pool_address = pool_address or ipx_pa
+            device_short_id = device_short_id or ipx_dsi
+            relay_id = relay_id or ipx_relay
 
         if not pool_address:
             _LOGGER.error(
-                "No compatible module (lr-pc or ipx) found in %d modules.",
+                "No compatible module (lr-pc* or ipx) yielded a "
+                "pool_address from %d modules.",
                 len(modules),
             )
         return pool_address, device_short_id, relay_id
@@ -107,10 +186,22 @@ class IndygoParser:
     def _find_filtration_module(
         pool_data: IndygoPoolData,
     ) -> IndygoModuleData | None:
-        """Find the module responsible for filtration."""
+        """Find the module responsible for filtration.
+
+        Looks up modules carrying a filtration program first, then any
+        module whose type starts with ``lr-pc`` (covers lr-pc, lr-pc-vs1,
+        lr-pc-vs2, ...).
+        """
         return next(
             (m for m in pool_data.modules.values() if m.filtration_program),
-            next((m for m in pool_data.modules.values() if m.type == "lr-pc"), None),
+            next(
+                (
+                    m
+                    for m in pool_data.modules.values()
+                    if str(m.type or "").startswith("lr-pc")
+                ),
+                None,
+            ),
         )
 
     def parse_data(
