@@ -2,92 +2,78 @@
     "config": {
         "step": {
             "user": {
-                "title": "Indygo Pool Configuration",
-                "description": "Please enter your MyIndygo credentials.",
+                "title": "Configuration Indygo Pool",
+                "description": "Saisis tes identifiants MyIndygo et l'identifiant de ta piscine (Pool ID).",
                 "data": {
                     "email": "Email",
-                    "password": "Password"
+                    "password": "Mot de passe",
+                    "pool_id": "Pool ID"
                 }
             }
         },
         "error": {
-            "auth": "Invalid credentials",
-            "connection": "Communication error",
-            "unknown": "Unknown error"
+            "auth": "Identifiants invalides",
+            "connection": "Erreur de communication",
+            "unknown": "Erreur inconnue"
         },
         "abort": {
-            "already_configured": "Device is already configured"
+            "already_configured": "Cette piscine est déjà configurée"
         }
     },
     "entity": {
         "sensor": {
-            "filtration_status": {
-                "name": "Statut de la filtration"
-            },
-            "water_temperature": {
-                "name": "Température de l'eau"
-            },
-            "electrolyzer_duration": {
-                "name": "Durée électrolyseur"
-            },
-            "ipx_salt": {
-                "name": "Niveau de sel"
-            },
-            "ph_setpoint": {
-                "name": "Consigne pH"
-            },
-            "production_setpoint": {
-                "name": "Consigne production"
-            },
-            "electrolyzer_mode": {
-                "name": "Mode électrolyseur"
-            },
-            "ph": {
-                "name": "pH"
-            },
-            "filtration_remaining_time": {
-                "name": "Temps restant filtration"
-            }
+            "filtration_status": { "name": "Statut de la filtration" },
+            "water_temperature": { "name": "Température de l'eau" },
+            "filtration_remaining_time": { "name": "Temps restant filtration" },
+
+            "electrolyzer_duration": { "name": "Durée totale électrolyseur" },
+            "electrolyse_today": { "name": "Électrolyse aujourd'hui" },
+            "electrolyse_yesterday": { "name": "Électrolyse hier" },
+            "electrolyse_remaining_percent": { "name": "Électrolyse restante" },
+            "ipx_salt": { "name": "Niveau de sel" },
+            "ph_setpoint": { "name": "Consigne pH" },
+            "ph_mode": { "name": "Mode pH" },
+            "orp_setpoint": { "name": "Consigne ORP (Redox)" },
+            "production_setpoint": { "name": "Consigne production" },
+            "electrolyzer_mode": { "name": "Mode électrolyseur" },
+            "boost_remaining_time": { "name": "Boost restant" },
+            "cell_voltage": { "name": "Tension cellule" },
+            "ph": { "name": "pH" },
+
+            "probe_temperature": { "name": "Température (sonde)" },
+            "probe_ph": { "name": "pH (sonde)" },
+            "probe_orp": { "name": "ORP (sonde)" },
+            "water_level": { "name": "Niveau d'eau" },
+
+            "battery_level": { "name": "Batterie" },
+            "battery_voltage": { "name": "Tension batterie" },
+            "secondary_battery_voltage": { "name": "Tension batterie secondaire" },
+            "cellular_signal_quality": { "name": "Qualité signal cellulaire" },
+            "last_radio_communication": { "name": "Dernière communication radio" },
+            "last_seen": { "name": "Vu pour la dernière fois" }
         },
         "binary_sensor": {
-            "is_online": {
-                "name": "En ligne"
-            },
-            "shutter": {
-                "name": "Volet"
-            },
-            "flow": {
-                "name": "Flux"
-            },
-            "cmd_entry": {
-                "name": "Commande"
-            },
-            "can_ph_entry": {
-                "name": "Entrée pH"
-            },
-            "boost_enabled": {
-                "name": "Boost"
-            },
-            "test_prod": {
-                "name": "Test production"
-            },
-            "ph_injection": {
-                "name": "Injection pH"
-            },
-            "cell_polarity": {
-                "name": "Polarité cellule"
-            },
-            "production_status": {
-                "name": "Statut production"
-            },
-            "filtration": {
-                "name": "Filtration"
-            }
+            "is_online": { "name": "{module} en ligne" },
+            "shutter": { "name": "Volet" },
+            "flow": { "name": "Débit" },
+            "cmd_entry": { "name": "Entrée commande" },
+            "can_ph_entry": { "name": "Entrée pH" },
+            "boost_enabled": { "name": "Boost actif" },
+            "test_prod": { "name": "Test production" },
+            "ph_injection": { "name": "Injection pH" },
+            "cell_polarity": { "name": "Polarité cellule" },
+            "production_status": { "name": "Production active" },
+            "filtration": { "name": "Filtration" },
+
+            "battery_low": { "name": "Batterie faible" },
+            "battery_alarm": { "name": "Alarme batterie" },
+            "clock_alarm": { "name": "Alarme horloge" },
+            "frost_free_enabled": { "name": "Hors-gel activé" },
+            "is_wintered": { "name": "Hivernage" },
+            "waiting_for_status_update": { "name": "En attente de mise à jour" }
         },
         "select": {
-            "filtration_mode": {
-                "name": "Mode filtration"
-            }
+            "filtration_mode": { "name": "Mode filtration" }
         }
     }
 }

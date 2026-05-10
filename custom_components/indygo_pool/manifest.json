@@ -10,5 +10,5 @@
     "iot_class": "cloud_polling",
     "issue_tracker": "https://github.com/FunFR/ha-indygo-pool/issues",
     "requirements": [],
-    "version": "2.3.4-vs2"
+    "version": "2.4.0-vs2"
 }

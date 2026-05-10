@@ -3,10 +3,11 @@
         "step": {
             "user": {
                 "title": "Indygo Pool Configuration",
-                "description": "Please enter your MyIndygo credentials.",
+                "description": "Enter your MyIndygo credentials and your Pool ID.",
                 "data": {
                     "email": "Email",
-                    "password": "Password"
+                    "password": "Password",
+                    "pool_id": "Pool ID"
                 }
             }
         },
@@ -21,73 +22,58 @@
     },
     "entity": {
         "sensor": {
-            "filtration_status": {
-                "name": "Filtration status"
-            },
-            "water_temperature": {
-                "name": "Water temperature"
-            },
-            "electrolyzer_duration": {
-                "name": "Electrolyzer duration"
-            },
-            "ipx_salt": {
-                "name": "Salt level"
-            },
-            "ph_setpoint": {
-                "name": "pH setpoint"
-            },
-            "production_setpoint": {
-                "name": "Production setpoint"
-            },
-            "electrolyzer_mode": {
-                "name": "Electrolyzer mode"
-            },
-            "ph": {
-                "name": "pH"
-            },
-            "filtration_remaining_time": {
-                "name": "Filtration remaining time"
-            }
+            "filtration_status": { "name": "Filtration status" },
+            "water_temperature": { "name": "Water temperature" },
+            "filtration_remaining_time": { "name": "Filtration remaining time" },
+
+            "electrolyzer_duration": { "name": "Electrolyzer total duration" },
+            "electrolyse_today": { "name": "Electrolysis today" },
+            "electrolyse_yesterday": { "name": "Electrolysis yesterday" },
+            "electrolyse_remaining_percent": { "name": "Electrolysis remaining" },
+            "ipx_salt": { "name": "Salt level" },
+            "ph_setpoint": { "name": "pH setpoint" },
+            "ph_mode": { "name": "pH mode" },
+            "orp_setpoint": { "name": "ORP setpoint" },
+            "production_setpoint": { "name": "Production setpoint" },
+            "electrolyzer_mode": { "name": "Electrolyzer mode" },
+            "boost_remaining_time": { "name": "Boost remaining" },
+            "cell_voltage": { "name": "Cell voltage" },
+            "ph": { "name": "pH" },
+
+            "probe_temperature": { "name": "Temperature (probe)" },
+            "probe_ph": { "name": "pH (probe)" },
+            "probe_orp": { "name": "ORP (probe)" },
+            "water_level": { "name": "Water level" },
+
+            "battery_level": { "name": "Battery" },
+            "battery_voltage": { "name": "Battery voltage" },
+            "secondary_battery_voltage": { "name": "Secondary battery voltage" },
+            "cellular_signal_quality": { "name": "Cellular signal quality" },
+            "last_radio_communication": { "name": "Last radio communication" },
+            "last_seen": { "name": "Last seen" }
         },
         "binary_sensor": {
-            "is_online": {
-                "name": "Online"
-            },
-            "shutter": {
-                "name": "Shutter"
-            },
-            "flow": {
-                "name": "Flow"
-            },
-            "cmd_entry": {
-                "name": "Command"
-            },
-            "can_ph_entry": {
-                "name": "pH Entry"
-            },
-            "boost_enabled": {
-                "name": "Boost"
-            },
-            "test_prod": {
-                "name": "Test Production"
-            },
-            "ph_injection": {
-                "name": "pH Injection"
-            },
-            "cell_polarity": {
-                "name": "Cell Polarity"
-            },
-            "production_status": {
-                "name": "Production Status"
-            },
-            "filtration": {
-                "name": "Filtration"
-            }
+            "is_online": { "name": "{module} online" },
+            "shutter": { "name": "Shutter" },
+            "flow": { "name": "Flow" },
+            "cmd_entry": { "name": "Command input" },
+            "can_ph_entry": { "name": "pH input" },
+            "boost_enabled": { "name": "Boost enabled" },
+            "test_prod": { "name": "Test production" },
+            "ph_injection": { "name": "pH injection" },
+            "cell_polarity": { "name": "Cell polarity" },
+            "production_status": { "name": "Production status" },
+            "filtration": { "name": "Filtration" },
+
+            "battery_low": { "name": "Battery low" },
+            "battery_alarm": { "name": "Battery alarm" },
+            "clock_alarm": { "name": "Clock alarm" },
+            "frost_free_enabled": { "name": "Frost-free enabled" },
+            "is_wintered": { "name": "Wintered" },
+            "waiting_for_status_update": { "name": "Waiting for status update" }
         },
         "select": {
-            "filtration_mode": {
-                "name": "Filtration mode"
-            }
+            "filtration_mode": { "name": "Filtration mode" }
         }
     }
 }

@@ -6,13 +6,41 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from .const import PROGRAM_TYPE_FILTRATION
+from .const import (
+    INPUT_TYPE_ORP,
+    INPUT_TYPE_PH,
+    INPUT_TYPE_TEMPERATURE,
+    INPUT_TYPE_WATER_LEVEL,
+    IPX_OUTPUT_ELECTROLYSER,
+    IPX_OUTPUT_PH,
+    PROGRAM_TYPE_FILTRATION,
+)
 from .models import IndygoModuleData, IndygoPoolData, IndygoSensorData
 
 _LOGGER = logging.getLogger(__name__)
 
 
-IPX_PH_SENSOR_TYPE = 6
+# Backwards-compatible alias used by older tests.
+IPX_PH_SENSOR_TYPE = INPUT_TYPE_PH
+
+# Map "input.type" -> sensor key + display unit, used by
+# ``_parse_module_inputs_typed`` to expose probe values from any module
+# (IPX, lr-mas, lr-niv) in a uniform way.
+INPUT_TYPE_SENSORS: dict[int, str] = {
+    INPUT_TYPE_TEMPERATURE: "probe_temperature",
+    INPUT_TYPE_PH: "probe_ph",
+    INPUT_TYPE_ORP: "probe_orp",
+    INPUT_TYPE_WATER_LEVEL: "water_level",
+}
+
+# Sentinel value used by Indygo for "no measurement / sensor absent".
+_INDYGO_INT_MAX = 2147483647
+
+# Module types that legitimately expose probe inputs (pH/ORP/temp/level).
+# Excluding ``lr-pc*`` and ``lr-mb*`` avoids polluting Pool Command and
+# Gateway devices with empty probe entities — they have ``inputs[]`` for
+# other purposes (hardware diagnostics) but no live probe values.
+_PROBE_MODULE_TYPE_PREFIXES: tuple[str, ...] = ("ipx", "lr-mas", "lr-niv", "lr-ps")
 
 
 def _get_nested(obj: dict | list | None, *keys: str) -> Any:
@@ -219,10 +247,19 @@ class IndygoParser:
         # 1. Modules Data
         self._parse_modules(json_data, pool_data)
 
-        # 2. IPX Data
+        # 2. IPX-specific parsing (electrolyser, salt, ORP, boost, etc.)
         self._parse_scraped_ipx(json_data, pool_data)
 
-        # 3. Main Pool Data — resolve filtration module once
+        # 3. Probe inputs (pH/ORP/temperature/water level) for every module
+        #    that exposes them — this catches the IPX *and* additional
+        #    sensors like lr-mas (LRPS) or lr-niv (water level).
+        self._parse_module_inputs_typed(pool_data)
+
+        # 4. Per-module diagnostics (batteries, signal, last radio com,
+        #    alarms, frost-free, hivernage flags).
+        self._parse_module_diagnostics(pool_data)
+
+        # 5. Main Pool Data — resolve filtration module once
         filt_module = self._find_filtration_module(pool_data)
         self._parse_root_sensors(json_data, pool_data, filt_module)
         self._parse_sensor_state(json_data, pool_data, filt_module)
@@ -473,59 +510,270 @@ class IndygoParser:
             pool_data.modules[str(m_id)] = indygo_module
 
     def _parse_scraped_ipx(self, json_data: dict, pool_data: IndygoPoolData) -> None:
-        """Parse ipx_module data."""
+        """Parse ipx_module data (electrolyser, salt, ORP, boost, etc.).
+
+        Extracts every IPX-specific field from ``ipx_module`` (which is a
+        copy of the IPX module enriched server-side).  Generic probe
+        inputs (pH/ORP/temperature) are handled by
+        ``_parse_module_inputs_typed`` so we don't duplicate them here.
+        """
         if "ipx_module" not in json_data:
             return
 
         ipx_mod = json_data["ipx_module"]
         outputs = ipx_mod.get("outputs", [])
+        ipx_data = ipx_mod.get("ipxData", {}) or {}
 
         ipx_module = next(
             (m for m in pool_data.modules.values() if m.type == "ipx"), None
         )
         target_sensors = ipx_module.sensors if ipx_module else pool_data.sensors
 
-        salt = _get_nested(outputs, 1, "ipxData", "saltValue")
-        if salt is not None:
-            target_sensors["ipx_salt"] = IndygoSensorData(key="ipx_salt", value=salt)
-
-        ph_set = _get_nested(outputs, 0, "ipxData", "pHSetpoint")
+        # ----- outputs[IPX_OUTPUT_PH] -> pH-related setpoints --------
+        ph_set = _get_nested(outputs, IPX_OUTPUT_PH, "ipxData", "pHSetpoint")
         if ph_set is not None:
             target_sensors["ph_setpoint"] = IndygoSensorData(
                 key="ph_setpoint", value=ph_set
             )
+        ph_mode = _get_nested(outputs, IPX_OUTPUT_PH, "ipxData", "pHMode")
+        if ph_mode is not None:
+            target_sensors["ph_mode"] = IndygoSensorData(key="ph_mode", value=ph_mode)
 
-        prod_set = _get_nested(outputs, 1, "ipxData", "percentageSetpoint")
+        # ----- outputs[IPX_OUTPUT_ELECTROLYSER] -> salt/ORP/boost ----
+        salt = _get_nested(outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "saltValue")
+        if salt is not None:
+            target_sensors["ipx_salt"] = IndygoSensorData(key="ipx_salt", value=salt)
+
+        orp_set = _get_nested(
+            outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "orpSetpoint"
+        )
+        if orp_set is not None:
+            target_sensors["orp_setpoint"] = IndygoSensorData(
+                key="orp_setpoint", value=orp_set
+            )
+
+        prod_set = _get_nested(
+            outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "percentageSetpoint"
+        )
         if prod_set is not None:
             target_sensors["production_setpoint"] = IndygoSensorData(
                 key="production_setpoint",
                 value=prod_set,
             )
 
-        elec_mode = _get_nested(outputs, 1, "ipxData", "electrolyzerMode")
+        # The API renamed ``electrolyzerMode`` to ``controllerMode`` at
+        # some point — fall back to either to stay compatible with both.
+        elec_mode = _get_nested(
+            outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "controllerMode"
+        )
+        if elec_mode is None:
+            elec_mode = _get_nested(
+                outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "electrolyzerMode"
+            )
         if elec_mode is not None:
             target_sensors["electrolyzer_mode"] = IndygoSensorData(
                 key="electrolyzer_mode",
                 value=elec_mode,
             )
 
-        # pH Latest (from inputs)
-        inputs = ipx_mod.get("inputs", [])
-        if isinstance(inputs, list):
+        boost_remaining = _get_nested(
+            outputs, IPX_OUTPUT_ELECTROLYSER, "ipxData", "boostRemainingTime"
+        )
+        if boost_remaining is not None:
+            target_sensors["boost_remaining_time"] = IndygoSensorData(
+                key="boost_remaining_time", value=boost_remaining
+            )
+
+        # ----- ipxData (root) -> diagnostic / gauge sensors ----------
+        cell_voltage = ipx_data.get("cellVoltage")
+        if cell_voltage is not None:
+            target_sensors["cell_voltage"] = IndygoSensorData(
+                key="cell_voltage", value=cell_voltage
+            )
+
+        elec_pct = ipx_data.get("remainingTimeElectrolyseDurationInPercent")
+        if elec_pct is not None:
+            target_sensors["electrolyse_remaining_percent"] = IndygoSensorData(
+                key="electrolyse_remaining_percent", value=elec_pct
+            )
+
+        elec_today = _get_nested(
+            ipx_data, "totalElectrolyseDurationCurrent", "value"
+        )
+        if elec_today is not None:
+            target_sensors["electrolyse_today"] = IndygoSensorData(
+                key="electrolyse_today",
+                value=elec_today,
+                extra_attributes={
+                    "date": _get_nested(
+                        ipx_data, "totalElectrolyseDurationCurrent", "date"
+                    )
+                },
+            )
+
+        elec_yesterday = _get_nested(
+            ipx_data, "totalElectrolyseDurationTheDayBefore", "value"
+        )
+        if elec_yesterday is not None:
+            target_sensors["electrolyse_yesterday"] = IndygoSensorData(
+                key="electrolyse_yesterday",
+                value=elec_yesterday,
+                extra_attributes={
+                    "date": _get_nested(
+                        ipx_data, "totalElectrolyseDurationTheDayBefore", "date"
+                    )
+                },
+            )
+
+        # totalElectrolyseDuration was already exposed by _parse_modules
+        # (as ``totalElectrolyseDuration`` key).  We expose the same value
+        # under a snake-case key for consistency in the sensor platform.
+        total_elec = ipx_data.get("totalElectrolyseDuration")
+        if total_elec is not None and "totalElectrolyseDuration" not in target_sensors:
+            target_sensors["totalElectrolyseDuration"] = IndygoSensorData(
+                key="totalElectrolyseDuration", value=total_elec
+            )
+
+    # ------------------------------------------------------------------
+    # Generic probe inputs (pH / ORP / temperature / water level)
+    # ------------------------------------------------------------------
+
+    def _parse_module_inputs_typed(self, pool_data: IndygoPoolData) -> None:
+        """Expose pH/ORP/temperature/water-level inputs from every module.
+
+        Indygo encodes probe values in ``module.inputs[].lastValue`` using a
+        type-based discriminator (5=temp, 6=pH, 7=ORP, 33=level).  This
+        method walks every module and stores those values in the module's
+        sensors dict so they can be turned into per-device entities.
+
+        The IPX exposes pH and ORP, the optional ``lr-mas`` (LRPS) probe
+        exposes temperature + pH + ORP, the ``lr-niv`` exposes a water
+        level.  We treat them all the same way — distinct entities are
+        created later because each module is a distinct HA device.
+        """
+        for module in pool_data.modules.values():
+            mod_type = str(module.type or "")
+            # Only expose probe inputs for actual probe-bearing modules
+            # (IPX electrolyser, dedicated probe sensors, water level).
+            if not any(mod_type.startswith(p) for p in _PROBE_MODULE_TYPE_PREFIXES):
+                continue
+
+            inputs = module.raw_data.get("inputs") or []
+            if not isinstance(inputs, list):
+                continue
+
             for inp in inputs:
-                last_val = inp.get("lastValue")
-                if last_val and "value" in last_val and last_val["value"] is not None:
-                    if inp.get("type") == IPX_PH_SENSOR_TYPE:
-                        val = last_val["value"]
-                        date_str = last_val.get("date")
+                inp_type = inp.get("type")
+                key = INPUT_TYPE_SENSORS.get(inp_type)
+                if key is None:
+                    continue
 
-                        extra_attrs = {}
-                        if date_str:
-                            extra_attrs["last_measurement_time"] = date_str
-
-                        target_sensors["ph"] = IndygoSensorData(
-                            key="ph",
-                            value=val,
-                            extra_attributes=extra_attrs,
+                last_val = inp.get("lastValue") or {}
+                value = last_val.get("value")
+                if value is None or value == _INDYGO_INT_MAX:
+                    # Module is sleeping or sensor not connected — still
+                    # emit an unavailable sensor by registering the key
+                    # without a value, so HA shows the entity but as
+                    # ``unavailable`` until the module reports.
+                    if key not in module.sensors:
+                        module.sensors[key] = IndygoSensorData(
+                            key=key,
+                            value=None,
+                            extra_attributes={
+                                "input_type": inp_type,
+                                "input_index": inp.get("index"),
+                            },
                         )
-                        break
+                    continue
+
+                extra: dict[str, Any] = {
+                    "input_type": inp_type,
+                    "input_index": inp.get("index"),
+                    "last_measurement_time": last_val.get("date"),
+                }
+                last_calibrated = inp.get("lastCalibratedAt")
+                if last_calibrated:
+                    extra["last_calibrated_at"] = last_calibrated
+
+                module.sensors[key] = IndygoSensorData(
+                    key=key,
+                    value=value,
+                    extra_attributes=extra,
+                )
+
+                # Backwards compatibility: the IPX pH was previously
+                # exposed under the bare ``ph`` key (consumed by the
+                # legacy IPX sensor description).  Keep mirroring it so
+                # existing dashboards keep working.
+                if module.type == "ipx" and inp_type == INPUT_TYPE_PH:
+                    module.sensors["ph"] = IndygoSensorData(
+                        key="ph", value=value, extra_attributes=extra
+                    )
+
+    # ------------------------------------------------------------------
+    # Per-module diagnostics (batteries, radio, signal, alarms)
+    # ------------------------------------------------------------------
+
+    def _parse_module_diagnostics(self, pool_data: IndygoPoolData) -> None:
+        """Expose battery / signal / radio / alarm fields per module."""
+        for module in pool_data.modules.values():
+            raw = module.raw_data
+
+            # Primary battery — Indygo encodes it as 0..5 (level enum).
+            battery_level = raw.get("battery")
+            if battery_level is not None and battery_level != _INDYGO_INT_MAX:
+                module.sensors["battery_level"] = IndygoSensorData(
+                    key="battery_level", value=battery_level
+                )
+
+            # Battery voltage in 1/10 V (e.g. 85 -> 8.5 V) — keep raw,
+            # the sensor platform applies the divisor for display.
+            battery_voltage = raw.get("batteryVoltage")
+            if battery_voltage is not None and battery_voltage != _INDYGO_INT_MAX:
+                module.sensors["battery_voltage"] = IndygoSensorData(
+                    key="battery_voltage", value=battery_voltage
+                )
+
+            # Secondary battery (mV typical scale)
+            sec_battery = raw.get("secondaryBatteryVoltage")
+            if sec_battery is not None and sec_battery != _INDYGO_INT_MAX:
+                module.sensors["secondary_battery_voltage"] = IndygoSensorData(
+                    key="secondary_battery_voltage", value=sec_battery
+                )
+
+            # Cellular signal quality — only present on the gateway (lr-mb)
+            csq = raw.get("cellularSignalQuality")
+            if csq is not None and str(module.type or "").startswith("lr-mb"):
+                module.sensors["cellular_signal_quality"] = IndygoSensorData(
+                    key="cellular_signal_quality", value=csq
+                )
+
+            # Last radio communication / last seen
+            last_radio = raw.get("lastRadioCommunication")
+            if last_radio:
+                module.sensors["last_radio_communication"] = IndygoSensorData(
+                    key="last_radio_communication", value=last_radio
+                )
+            seen_at = raw.get("seenAt")
+            if seen_at:
+                module.sensors["last_seen"] = IndygoSensorData(
+                    key="last_seen", value=seen_at
+                )
+
+            # Software / hardware versions as diagnostic attributes on
+            # the per-module battery_level sensor (no need to create
+            # dedicated sensors for static info).
+            sw = raw.get("softwareVersion")
+            hw = raw.get("hardwareVersion")
+            if (sw or hw) and "battery_level" in module.sensors:
+                module.sensors["battery_level"].extra_attributes.update(
+                    {
+                        k: v
+                        for k, v in {
+                            "software_version": sw,
+                            "hardware_version": hw,
+                            "serial_number": raw.get("serialNumber"),
+                        }.items()
+                        if v
+                    }
+                )
