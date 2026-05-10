@@ -81,6 +81,10 @@ class IndygoParser:
             return parts[1]
         return None
 
+    # Public alias so api.py can compute short ids without reaching into
+    # a private method.
+    name_suffix = _name_suffix
+
     def _extract_device_ids(self, lr_pc: dict) -> tuple[str | None, str | None]:
         """Extract device short ID and relay ID from lr-pc module."""
         device_short_id = self._name_suffix(lr_pc.get("name"))
@@ -254,6 +258,13 @@ class IndygoParser:
         #    that exposes them — this catches the IPX *and* additional
         #    sensors like lr-mas (LRPS) or lr-niv (water level).
         self._parse_module_inputs_typed(pool_data)
+
+        # 3bis. Live values from per-module status endpoints (lr-mas,
+        #    lr-niv...).  Those modules don't expose ``inputs[].lastValue``
+        #    but their ``sensorState`` (fetched from
+        #    ``/v1/module/<gw>/status/<short_id>``) contains the actual
+        #    pH/ORP/temperature/water-level values.
+        self._parse_module_statuses(json_data, pool_data)
 
         # 4. Per-module diagnostics (batteries, signal, last radio com,
         #    alarms, frost-free, hivernage flags).
@@ -708,6 +719,118 @@ class IndygoParser:
                 if module.type == "ipx" and inp_type == INPUT_TYPE_PH:
                     module.sensors["ph"] = IndygoSensorData(
                         key="ph", value=value, extra_attributes=extra
+                    )
+
+    # ------------------------------------------------------------------
+    # Per-module live status (sensorState from /v1/module/<gw>/status/...)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decode_sensor_state_value(value: float, input_type: int | None):
+        """Apply the per-type transform on a raw sensorState value.
+
+        - temperature (5) and pH (6) are stored as ``x*100`` (e.g. 2975
+          for 29.75°C, 727 for pH 7.27).
+        - ORP (7) and water level (33) are stored raw.
+        """
+        if value is None or value == _INDYGO_INT_MAX:
+            return None
+        if input_type in (INPUT_TYPE_TEMPERATURE, INPUT_TYPE_PH):
+            return round(value / 100.0, 2)
+        return value
+
+    def _parse_module_statuses(
+        self, json_data: dict, pool_data: IndygoPoolData
+    ) -> None:
+        """Decode ``module_statuses`` (per-module /status payloads).
+
+        Each entry contains ``sensorState[]`` whose indices map to the
+        module's ``inputs[]`` (sensorState[i] -> input.index == i+1).
+        We decode the value using the input's ``type`` so the resulting
+        ``module.sensors[probe_*]`` carries human-readable values.
+        """
+        statuses = json_data.get("module_statuses")
+        if not isinstance(statuses, dict):
+            return
+
+        for module_id, status in statuses.items():
+            module = pool_data.modules.get(str(module_id))
+            if module is None or not isinstance(status, dict):
+                continue
+
+            ts = status.get("dialogTimeStamp")
+
+            # 1. Battery (primary + secondary "sps")
+            bat = status.get("battery")
+            if bat is not None and bat != _INDYGO_INT_MAX:
+                # Override or create — /status battery is fresher than the
+                # one cached in module.raw_data.
+                module.sensors["battery_level"] = IndygoSensorData(
+                    key="battery_level",
+                    value=bat,
+                    extra_attributes={"source": "module_status", "timestamp": ts},
+                )
+
+            sps = status.get("sps") or {}
+            sps_bat = sps.get("battery")
+            if sps_bat is not None and sps_bat != _INDYGO_INT_MAX:
+                module.sensors["secondary_battery_voltage"] = IndygoSensorData(
+                    key="secondary_battery_voltage",
+                    value=sps_bat,
+                    extra_attributes={"source": "module_status", "timestamp": ts},
+                )
+
+            # 2. sensorState[] -> typed probe values
+            sensor_state = status.get("sensorState") or []
+            if not isinstance(sensor_state, list):
+                continue
+
+            inputs = module.raw_data.get("inputs") or []
+            inputs_by_index: dict[int, dict] = {}
+            for inp in inputs:
+                idx = inp.get("index")
+                if isinstance(idx, int):
+                    inputs_by_index[idx] = inp
+
+            for pos, item in enumerate(sensor_state):
+                if not isinstance(item, dict):
+                    continue
+                raw = item.get("value")
+                if raw is None or raw == _INDYGO_INT_MAX:
+                    continue
+
+                # sensorState position is 0-based, input.index is 1-based.
+                inp = inputs_by_index.get(pos + 1)
+                if inp is None:
+                    continue
+                inp_type = inp.get("type")
+                key = INPUT_TYPE_SENSORS.get(inp_type)
+                if not key:
+                    continue
+
+                decoded = self._decode_sensor_state_value(raw, inp_type)
+                if decoded is None:
+                    continue
+
+                module.sensors[key] = IndygoSensorData(
+                    key=key,
+                    value=decoded,
+                    extra_attributes={
+                        "source": "module_status",
+                        "raw_value": raw,
+                        "input_type": inp_type,
+                        "input_index": inp.get("index"),
+                        "last_measurement_time": ts,
+                    },
+                )
+
+                # Keep the legacy ``ph`` key in sync for the IPX so
+                # existing dashboards/users don't break.
+                if module.type == "ipx" and inp_type == INPUT_TYPE_PH:
+                    module.sensors["ph"] = IndygoSensorData(
+                        key="ph",
+                        value=decoded,
+                        extra_attributes={"source": "module_status"},
                     )
 
     # ------------------------------------------------------------------

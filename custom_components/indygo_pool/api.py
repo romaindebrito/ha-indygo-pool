@@ -434,7 +434,56 @@ class IndygoPoolApiClient:
         if ipx_module:
             status_data["ipx_module"] = ipx_module
 
-        # 7. Parse into structured data
+        # 7. Fetch live status for every secondary module (lr-mas, lr-niv,
+        #    additional probes…).  Same endpoint as the Pool Command, but
+        #    with the secondary module's short id.  Some modules (IPX,
+        #    Gateway) return ``{"erreurtraitement": N}`` on this endpoint —
+        #    we ignore them.  Fetches run concurrently to stay fast.
+        module_statuses: dict[str, dict] = {}
+
+        async def _fetch_secondary(mod: dict) -> None:
+            m_type = str(mod.get("type", "") or "")
+            if m_type.startswith("lr-mb"):
+                return  # gateway itself
+            if m_type.startswith("lr-pc"):
+                return  # already fetched above
+            if m_type == "ipx":
+                return  # returns {"erreurtraitement": ...}
+            short_id = self._parser.name_suffix(mod.get("name"))
+            if not short_id:
+                return
+            sub_url = (
+                f"{BASE_URL}/v1/module/{self._pool_address}/status/{short_id}"
+            )
+            try:
+                payload = await self._request(
+                    "GET",
+                    sub_url,
+                    headers={"x-requested-with": "XMLHttpRequest"},
+                    return_json=True,
+                )
+            except IndygoPoolApiClientError as exc:
+                LOGGER.debug(
+                    "Secondary status fetch failed for %s (%s): %s",
+                    mod.get("type"),
+                    short_id,
+                    exc,
+                )
+                return
+            if isinstance(payload, dict) and "sensorState" in payload:
+                module_statuses[str(mod.get("id"))] = payload
+                LOGGER.debug(
+                    "Secondary status for %s/%s -> %d sensorState entries",
+                    mod.get("type"),
+                    short_id,
+                    len(payload.get("sensorState", []) or []),
+                )
+
+        await asyncio.gather(*[_fetch_secondary(m) for m in modules])
+        if module_statuses:
+            status_data["module_statuses"] = module_statuses
+
+        # 8. Parse into structured data
         self._data = self._parser.parse_data(
             status_data,
             self._pool_id,
