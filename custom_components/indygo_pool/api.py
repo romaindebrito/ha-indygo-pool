@@ -33,6 +33,16 @@ _OAUTH2_BASIC = base64.b64encode(
 # Safety margin before considering the token expired (seconds).
 _TOKEN_EXPIRY_MARGIN = 300
 
+# Transient HTTP statuses to retry with exponential backoff.  408 is
+# common when the device is asleep on LoRaWAN: the server proxies the
+# call to the gateway, the gateway waits for the next radio window, and
+# eventually times out.  5xx are generic transient errors.
+_RETRYABLE_STATUSES: frozenset[int] = frozenset({408, 502, 503, 504})
+
+# Max retries for transient failures and base backoff (seconds).
+_MAX_TRANSIENT_RETRIES = 3
+_TRANSIENT_BACKOFF_BASE = 2.0
+
 
 class IndygoPoolApiClientError(Exception):
     """Exception to indicate a general API error."""
@@ -135,6 +145,42 @@ class IndygoPoolApiClient:
         if not self._token_is_valid():
             await self.async_login()
 
+    async def async_validate_credentials(self) -> None:
+        """Validate the credentials and account topology without fetching
+        live status from the device.
+
+        Used by the config flow to avoid blocking on a 408 (typical when
+        a LoRaWAN device is asleep at the moment of configuration).
+        Performs three checks:
+
+        * OAuth2 login succeeds (catches bad email/password).
+        * The user has at least one module visible.
+        * Hardware identifiers can be resolved (Pool Command + gateway,
+          or IPX in fallback).
+
+        Raises ``IndygoPoolApiClientAuthenticationError`` for invalid
+        credentials and ``IndygoPoolApiClientError`` for any other
+        configuration problem (no modules, no compatible module).
+        """
+        await self.async_login()
+
+        modules = await self._fetch_modules_metadata()
+        if not modules:
+            raise IndygoPoolApiClientError(
+                "Account has no modules — cannot configure integration."
+            )
+
+        # _resolve_hardware_ids will raise IndygoPoolApiClientError if no
+        # compatible module is found.
+        await self._resolve_hardware_ids(modules)
+        LOGGER.debug(
+            "Credentials validated: %d modules, pool_address=%s, "
+            "device_short_id=%s",
+            len(modules),
+            self._pool_address,
+            self._device_short_id,
+        )
+
     # ------------------------------------------------------------------
     # Generic HTTP helper
     # ------------------------------------------------------------------
@@ -151,7 +197,10 @@ class IndygoPoolApiClient:
     ) -> dict | str:
         """Perform an authenticated HTTP request.
 
-        Automatically adds the Bearer token and retries once on 401/403.
+        Automatically adds the Bearer token, retries once on 401/403 (token
+        refresh) and retries up to ``_MAX_TRANSIENT_RETRIES`` times with
+        exponential backoff on 408/502/503/504 (typically caused by a
+        sleeping LoRaWAN device that did not respond in time).
         """
         await self._ensure_token()
 
@@ -162,59 +211,125 @@ class IndygoPoolApiClient:
         if headers:
             request_headers.update(headers)
 
-        try:
-            LOGGER.debug("--- REQUEST: %s %s ---", method, url)
-            async with self._session.request(
-                method,
-                url,
-                headers=request_headers,
-                data=data,
-                json=json_body,
-            ) as response:
-                if response.status in (
-                    HTTPStatus.UNAUTHORIZED,
-                    HTTPStatus.FORBIDDEN,
-                ):
-                    if retry_auth:
-                        LOGGER.debug("Token expired, re-authenticating...")
-                        await self.async_login()
-                        return await self._request(
+        last_status: int | None = None
+        last_text: str | None = None
+
+        for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+            try:
+                LOGGER.debug(
+                    "--- REQUEST (attempt %d/%d): %s %s ---",
+                    attempt + 1,
+                    _MAX_TRANSIENT_RETRIES + 1,
+                    method,
+                    url,
+                )
+                async with self._session.request(
+                    method,
+                    url,
+                    headers=request_headers,
+                    data=data,
+                    json=json_body,
+                ) as response:
+                    if response.status in (
+                        HTTPStatus.UNAUTHORIZED,
+                        HTTPStatus.FORBIDDEN,
+                    ):
+                        if retry_auth:
+                            LOGGER.debug("Token expired, re-authenticating...")
+                            await self.async_login()
+                            return await self._request(
+                                method,
+                                url,
+                                headers=headers,
+                                data=data,
+                                json_body=json_body,
+                                return_json=return_json,
+                                retry_auth=False,
+                            )
+                        raise IndygoPoolApiClientAuthenticationError(
+                            f"Authentication failed: {response.status}"
+                        )
+
+                    if response.status in _RETRYABLE_STATUSES:
+                        last_status = response.status
+                        try:
+                            last_text = await response.text()
+                        except Exception:
+                            last_text = "<could not read response>"
+                        if attempt < _MAX_TRANSIENT_RETRIES:
+                            backoff = _TRANSIENT_BACKOFF_BASE * (2**attempt)
+                            LOGGER.warning(
+                                "Transient %s on %s %s (attempt %d/%d), "
+                                "retrying in %.1fs",
+                                response.status,
+                                method,
+                                url,
+                                attempt + 1,
+                                _MAX_TRANSIENT_RETRIES + 1,
+                                backoff,
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        # Out of retries — fall through to error handling
+                        LOGGER.error(
+                            "Giving up after %d retries on %s %s: %s - %s",
+                            _MAX_TRANSIENT_RETRIES,
                             method,
                             url,
-                            headers=headers,
-                            data=data,
-                            json_body=json_body,
-                            return_json=return_json,
-                            retry_auth=False,
+                            response.status,
+                            last_text,
                         )
-                    raise IndygoPoolApiClientAuthenticationError(
-                        f"Authentication failed: {response.status}"
-                    )
+                        raise IndygoPoolApiClientCommunicationError(
+                            f"Request failed after {_MAX_TRANSIENT_RETRIES} "
+                            f"retries: {response.status}"
+                        )
 
-                if response.status != HTTPStatus.OK:
-                    try:
-                        text = await response.text()
-                    except Exception:
-                        text = "<could not read response>"
-                    LOGGER.error(
-                        "API %s %s failed: %s - %s",
+                    if response.status != HTTPStatus.OK:
+                        try:
+                            text = await response.text()
+                        except Exception:
+                            text = "<could not read response>"
+                        LOGGER.error(
+                            "API %s %s failed: %s - %s",
+                            method,
+                            url,
+                            response.status,
+                            text,
+                        )
+                        raise IndygoPoolApiClientCommunicationError(
+                            f"Request failed: {response.status}"
+                        )
+
+                    if return_json:
+                        return await response.json()
+                    return await response.text()
+
+            except aiohttp.ClientError as exc:
+                # Treat connection-level errors as transient too, with the
+                # same retry budget.
+                if attempt < _MAX_TRANSIENT_RETRIES:
+                    backoff = _TRANSIENT_BACKOFF_BASE * (2**attempt)
+                    LOGGER.warning(
+                        "Network error on %s %s (attempt %d/%d): %s — "
+                        "retrying in %.1fs",
                         method,
                         url,
-                        response.status,
-                        text,
+                        attempt + 1,
+                        _MAX_TRANSIENT_RETRIES + 1,
+                        exc,
+                        backoff,
                     )
-                    raise IndygoPoolApiClientCommunicationError(
-                        f"Request failed: {response.status}"
-                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise IndygoPoolApiClientCommunicationError(
+                    f"Error communicating with API: {exc}"
+                ) from exc
 
-                if return_json:
-                    return await response.json()
-                return await response.text()
-
-        except aiohttp.ClientError as exc:
-            raise IndygoPoolApiClientCommunicationError(
-                f"Error communicating with API: {exc}"
-            ) from exc
+        # Defensive: should never reach here as the loop always either
+        # returns or raises.
+        raise IndygoPoolApiClientCommunicationError(
+            f"Request failed: status={last_status} body={last_text!r}"
+        )
 
     # ------------------------------------------------------------------
     # API data helpers

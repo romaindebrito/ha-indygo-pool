@@ -68,7 +68,14 @@ class IndygoPoolFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _test_credentials(self, email: str, password: str, pool_id: str) -> None:
-        """Validate credentials."""
+        """Validate credentials.
+
+        Uses ``async_validate_credentials`` (login + module list + hardware
+        ID resolution) instead of a full ``async_get_data`` so that the
+        config flow does not fail when the LoRaWAN device is asleep at the
+        moment of setup (which would otherwise return HTTP 408 from the
+        ``/v1/module/.../status/...`` endpoint).
+        """
         session = async_create_clientsession(self.hass)
 
         client = IndygoPoolApiClient(
@@ -77,5 +84,4 @@ class IndygoPoolFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             pool_id=pool_id,
             session=session,
         )
-        # Test credentials by attempting to get data
-        await client.async_get_data()
+        await client.async_validate_credentials()
